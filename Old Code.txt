@@ -1,0 +1,271 @@
+#include <iostream>
+#include <windows.h>
+#include <sstream>
+#include <setupapi.h>
+#include <cfgmgr32.h>
+#include <string>
+#include <tchar.h>
+#include <dbt.h>
+#include <array>
+#include <fstream>
+#include <initguid.h>
+#include "usbiodef.h"
+#pragma comment(lib, "setupapi.lib")
+
+
+// 
+PDEV_BROADCAST_DEVICEINTERFACE_A info_device;
+SERVICE_STATUS status_service = {0};
+SERVICE_STATUS_HANDLE handle = NULL;
+WCHAR SERVICE_NAME[] = {'M','y','S','e','r','v','i','c','e','\0'};
+DEV_BROADCAST_DEVICEINTERFACE NotificationFilter;
+
+constexpr auto MAX_DEV_LEN = 1024;
+
+
+bool printListDeviceInSys(GUID UserGuid);
+// Convert type string to type GUID
+GUID StringToGuid(const std::string& str);
+// Convert type GUID to type string
+std::string guidToString(GUID guid);
+// Out log programm in file
+void Log(const char* text, char* name, GUID tguid);
+
+// Service command handler
+DWORD __stdcall ServiceCtrlHandlerEx(DWORD ctlcode, DWORD evtype, PVOID evdata, DWORD request);
+
+// Point of entry service
+VOID WINAPI ServiceMain(DWORD argc, LPTSTR * argv);
+
+// Main function
+int _tmain(int argc, TCHAR *argv[]) {
+
+	SERVICE_TABLE_ENTRY service_table[] = {
+		{SERVICE_NAME, (LPSERVICE_MAIN_FUNCTION)ServiceMain},
+		{NULL, NULL}
+	};
+
+	Log("Start service\n",NULL, GUID_NULL);
+	if (StartServiceCtrlDispatcher(service_table) == FALSE) {
+		Log("Fail start service (_tmain StartServiceCtrlDispatcher Error). Error: \n", NULL, GUID_NULL);
+	}
+	return 0;
+}
+
+// Convert type string to type GUID
+GUID StringToGuid(const std::string& str)
+{
+	GUID guid;
+	sscanf(str.c_str(),
+		"{%8x-%4hx-%4hx-%2hhx%2hhx-%2hhx%2hhx%2hhx%2hhx%2hhx%2hhx}",
+		&guid.Data1, &guid.Data2, &guid.Data3,
+		&guid.Data4[0], &guid.Data4[1], &guid.Data4[2], &guid.Data4[3],
+		&guid.Data4[4], &guid.Data4[5], &guid.Data4[6], &guid.Data4[7]);
+
+	return guid;
+}
+
+// Convert type GUID to type string
+std::string guidToString(GUID guid) {
+	std::array<char, 40> output;
+	snprintf(output.data(), output.size(), "{%08X-%04hX-%04hX-%02X%02X-%02X%02X%02X%02X%02X%02X}", guid.Data1, guid.Data2, guid.Data3, guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3], guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
+	return std::string(output.data());
+}
+
+void LogListGuid() {
+
+}
+
+// Out log programm in file
+void Log(const char* text, char* name,  GUID tguid)
+{
+	// Open file
+	int i = 0;
+	std::fstream file;
+	file.open("C:/Windows/System32/MySevice/TestSocketServiceLog.txt", std::fstream::app);
+	// Save system time
+	std::time_t now = time(0);
+	tm* timeinfo = localtime(&now);
+	// Это переделать нахуй
+	if (text != NULL) {
+		file << '\n' << "----TEXT----" << '\n' << text << '\n' << "TIME: " << timeinfo->tm_hour << ':' << timeinfo->tm_min;
+	}
+	if (name != NULL) {
+		file << '\n' << "--DEVICE-NAME--" << '\n'; 
+		file << name;
+		file << '\n' << "TIME: " << timeinfo->tm_hour << ':' << timeinfo->tm_min;
+	}
+	if (tguid != GUID_NULL) {
+		file << '\n' << "--DEVICE-GUID--" << '\n';
+		file << '\n' << "GUID: " << guidToString(tguid);
+	}
+	
+	// File close
+	file.close();
+}
+
+// Service command handler
+DWORD __stdcall ServiceCtrlHandlerEx(DWORD ctlcode, DWORD evtype,PVOID evdata, PVOID context) {
+	Log("ServiceCtrlHandlerEx", NULL, GUID_NULL);
+	switch (ctlcode)
+	{
+		case SERVICE_ACCEPT_STOP: // Command stop service
+			Log("Stopped.", NULL, GUID_NULL);
+			status_service.dwWin32ExitCode = 0;
+			status_service.dwCurrentState = SERVICE_CONTROL_STOP;
+			if (SetServiceStatus(handle, &status_service) == false) {
+				Log("Fail treatment event service (ServiceCtrlHandlerEx SetServiceStatus)", NULL, GUID_NULL);
+				return ERROR;
+			}
+			return NO_ERROR;
+
+		case SERVICE_CONTROL_DEVICEEVENT: // Windows send notification about move device
+			Log("Configurate PC change", NULL, GUID_NULL);
+			info_device = (PDEV_BROADCAST_DEVICEINTERFACE_A)evdata;
+			switch (evtype) {
+				case DBT_DEVICEREMOVECOMPLETE: // The notification about remove device
+					if (info_device != NULL && info_device->dbcc_devicetype == DBT_DEVTYP_DEVICEINTERFACE) {
+						Log("Device remove", NULL, GUID_NULL);
+						Log(NULL,NULL, info_device->dbcc_classguid);
+						if(!printListDeviceInSys(info_device->dbcc_classguid)){
+							Log("Print device ID ERROR", NULL, GUID_NULL);
+							return ERROR;
+						}
+					};
+					return NO_ERROR;
+				case DBT_DEVICEARRIVAL: // The notification about enable device
+					Log("Device arrival", NULL, GUID_NULL);
+					Log(NULL, NULL, info_device->dbcc_classguid);
+					if (!printListDeviceInSys(info_device->dbcc_classguid)) {
+						Log("Print device ID ERROR", NULL, GUID_NULL);
+						return ERROR;
+					}
+					return NO_ERROR;
+			}
+			return NO_ERROR;
+	}
+	if (SetServiceStatus(handle, &status_service) == false) {
+		Log("Fail set status (ServiceCtrlHandlerEx SetServiceStatus)", NULL, GUID_NULL);
+		return ERROR;
+	}
+	return NO_ERROR;
+}
+
+// Point of entry service
+VOID WINAPI ServiceMain(DWORD argc, LPTSTR* argv) {
+	
+	// Register service in SVC Manager
+	handle = RegisterServiceCtrlHandlerEx(SERVICE_NAME, (LPHANDLER_FUNCTION_EX)ServiceCtrlHandlerEx, 0);
+	if (handle == NULL) {
+		Log("Error reg handle (ServiceMain RegisterServiceCtrlHandlerEx)", NULL, GUID_NULL);
+		return;
+	}
+	
+	// Give status service
+	status_service.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+	status_service.dwCurrentState = SERVICE_START_PENDING;
+	status_service.dwControlsAccepted = SERVICE_ACCEPT_STOP;
+	status_service.dwWin32ExitCode = 0;
+	status_service.dwServiceSpecificExitCode = 0;
+	status_service.dwCheckPoint = 0;
+	status_service.dwWaitHint = 0;
+	if (SetServiceStatus(handle, &status_service) == false) {
+		Log("Error SetServiceStatus 112 (ServiceMain)", NULL, GUID_NULL);
+		return;
+	}
+	
+	// Register for natification windows
+	//std::string guid_temp = "{4d36e96f-e325-11ce-bfc1-08002be10318}";
+	ZeroMemory(&NotificationFilter, sizeof(NotificationFilter));
+	NotificationFilter.dbcc_size = sizeof(DEV_BROADCAST_DEVICEINTERFACE);
+	NotificationFilter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+	NotificationFilter.dbcc_reserved = 0;
+	//NotificationFilter.dbcc_classguid = StringToGuid(guid_temp);
+	HDEVNOTIFY m_hDevNotify = RegisterDeviceNotification(handle,
+		&NotificationFilter, DEVICE_NOTIFY_SERVICE_HANDLE | DEVICE_NOTIFY_ALL_INTERFACE_CLASSES);
+	if (m_hDevNotify == NULL) {
+		Log("Error reg to natification (ServiceMain RegisterDeviceNotification)", NULL, GUID_NULL);
+		return;
+	}
+	
+
+
+	status_service.dwCurrentState = SERVICE_RUNNING;
+	if (SetServiceStatus(handle, &status_service) == false) {
+		Log("Error SetServiceStatus 117 (ServiceMain)", NULL, GUID_NULL);
+		return;
+	}
+
+	while (status_service.dwCurrentState == SERVICE_RUNNING) {
+	
+	}
+}
+
+
+
+
+bool printListDeviceInSys(GUID UserGuid) {
+	bool result = true;
+	HDEVINFO HI_handle_of_all_device; // Handle of all devices
+
+	DWORD i = 0; // counter for device
+	bool BL_get_info_from_handl = true; // result gets info 
+	PSP_DEVINFO_DATA PDD_device_info = new SP_DEVINFO_DATA; // info device
+	PDD_device_info->cbSize = sizeof(SP_DEVINFO_DATA); // ???
+	
+	bool BL_get_device_info = false;
+	PSTR PS_id_device = new char[MAX_DEV_LEN];
+	PDWORD PDW_needSize = new DWORD;
+
+	HI_handle_of_all_device = SetupDiGetClassDevs(&UserGuid, 0, 0, DIGCF_ALLCLASSES);
+	if (HI_handle_of_all_device != INVALID_HANDLE_VALUE) {
+		
+		while (BL_get_info_from_handl) {
+			BL_get_info_from_handl = SetupDiEnumDeviceInfo(HI_handle_of_all_device, i, PDD_device_info);
+			if (BL_get_info_from_handl) {
+
+				BL_get_device_info = SetupDiGetDeviceInstanceIdA(HI_handle_of_all_device, PDD_device_info,
+					PS_id_device, MAX_DEV_LEN, PDW_needSize);
+				//std::cout << "ITERATION #" << i << std::endl;
+				if (BL_get_device_info) {
+					
+					Log(NULL, PS_id_device, GUID_NULL);
+					result = true;
+					//std::cout << PS_id_device << std::endl;
+				}
+				else {
+					Log("SetupDiGetDeviceInstanceIdA error", NULL, GUID_NULL);
+					result = false;
+					return result;
+					//std::cout << "SetupDiGetDeviceInstanceIdA error - " << GetLastError() << std::endl;
+				}
+				i++;
+			}
+			else {
+				if (GetLastError() != 259) {
+					Log("SetupDiEnumDeviceInfo error", NULL, GUID_NULL);
+					result = false;
+					return result;
+					//std::cout << "SUCCES" << std::endl;
+				}
+				//else {
+				//	std::cout << "SetupDiEnumDeviceInfo error - " << GetLastError() << std::endl;
+				//	break;
+				//}
+			}
+		}
+		//std::cout << "DEVICE: " << i-1 << std::endl;
+		
+	}
+	else {
+		result = false;
+		Log("SetupDiGetClassDevs Error", NULL, GUID_NULL);
+		//int errorGet = GetLastError();
+		//std::cout << "SetupDiGetClassDevs Error - " << errorGet << std::endl;
+		
+	}
+	delete PDD_device_info;
+	delete[] PS_id_device;
+	delete PDW_needSize;
+	return result;
+}
